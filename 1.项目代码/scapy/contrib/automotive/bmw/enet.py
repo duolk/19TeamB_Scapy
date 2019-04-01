@@ -5,10 +5,13 @@
 # Copyright (C) Nils Weiss <nils@we155.de>
 # This program is published under a GPLv2 license
 
+# scapy.contrib.description = ENET - BMW diagnostic protocol over Ethernet
+# scapy.contrib.status = loads
+
 import struct
 import socket
 from scapy.packet import Packet, bind_layers, bind_bottom_up
-from scapy.fields import LenField, ShortEnumField, XByteField
+from scapy.fields import IntField, ShortEnumField, XByteField
 from scapy.layers.inet import TCP
 from scapy.supersocket import StreamSocket
 from scapy.contrib.automotive.uds import UDS
@@ -18,13 +21,13 @@ from scapy.contrib.automotive.uds import UDS
 BMW specific diagnostic over IP protocol implementation ENET
 """
 
-# #########################DoIP###################################
+# #########################ENET###################################
 
 
 class ENET(Packet):
     name = 'ENET'
     fields_desc = [
-        LenField('length', None, fmt='I', adjust=lambda x: x + 2),
+        IntField('length', None),
         ShortEnumField('type', 1, {0x01: "message",
                                    0x02: "echo"}),
         XByteField('src', 0),
@@ -42,7 +45,15 @@ class ENET(Packet):
         return 0
 
     def extract_padding(self, s):
-        return s[:8], s[8:]
+        return s[:self.length - 2], s[self.length - 2:]
+
+    def post_build(self, pkt, pay):
+        """
+        This will set the LenField 'length' to the correct value.
+        """
+        if self.length is None:
+            pkt = struct.pack("!I", len(pay) + 2) + pkt[4:]
+        return pkt + pay
 
 
 bind_bottom_up(TCP, ENET, sport=6801)
@@ -51,9 +62,10 @@ bind_layers(TCP, ENET, sport=6801, dport=6801)
 bind_layers(ENET, UDS)
 
 
-# ########################DoIPSocket###################################
+# ########################ENETSocket###################################
 
-class DoIPSocket(StreamSocket):
+
+class ENETSocket(StreamSocket):
     def __init__(self, ip='127.0.0.1', port=6801):
         s = socket.socket()
         s.connect((ip, port))

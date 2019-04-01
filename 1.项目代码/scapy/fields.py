@@ -14,6 +14,7 @@ import inspect
 import socket
 import struct
 import time
+from types import MethodType
 
 
 from scapy.config import conf
@@ -23,7 +24,7 @@ from scapy.volatile import RandBin, RandByte, RandEnumKeys, RandInt, \
     RandSByte, RandTermString, VolatileValue
 from scapy.data import EPOCH
 from scapy.error import log_runtime, Scapy_Exception
-from scapy.compat import bytes_hex, chb, orb, plain_str, raw
+from scapy.compat import bytes_hex, chb, orb, plain_str, raw, bytes_encode
 from scapy.pton_ntop import inet_ntop, inet_pton
 from scapy.utils import inet_aton, inet_ntoa, lhex, mac2str, str2mac
 from scapy.utils6 import in6_6to4ExtractAddr, in6_isaddr6to4, \
@@ -114,7 +115,7 @@ class Field(six.with_metaclass(Field_metaclass, object)):
         if x is None:
             x = 0
         elif isinstance(x, str):
-            return raw(x)
+            return bytes_encode(x)
         return x
 
     def any2i(self, pkt, x):
@@ -177,6 +178,7 @@ class Field(six.with_metaclass(Field_metaclass, object)):
 
 
 class Emph(object):
+    """Empathize sub-layer for display"""
     __slots__ = ["fld"]
 
     def __init__(self, fld):
@@ -393,6 +395,30 @@ class ReversePadField(PadField):
     def addfield(self, pkt, s, val):
         sval = self._fld.addfield(pkt, b"", val)
         return s + struct.pack("%is" % (self.padlen(len(s))), self._padwith) + sval  # noqa: E501
+
+
+class FCSField(Field):
+    """Special Field that gets its value from the end of the *packet*
+    (Note: not layer, but packet).
+
+    Mostly used for FCS
+    """
+    def getfield(self, pkt, s):
+        val = self.m2i(pkt, struct.unpack(self.fmt, s[-self.sz:])[0])
+        return s[:-self.sz], val
+
+    def addfield(self, pkt, s, val):
+        previous_post_build = pkt.post_build
+        value = struct.pack(self.fmt, self.i2m(pkt, val))
+
+        def _post_build(self, p, pay):
+            pay += value
+            return previous_post_build(p, pay)
+        pkt.post_build = MethodType(_post_build, pkt)
+        return s
+
+    def i2repr(self, pkt, x):
+        return lhex(self.i2h(pkt, x))
 
 
 class DestField(Field):
@@ -885,7 +911,7 @@ class StrField(Field):
 
     def any2i(self, pkt, x):
         if isinstance(x, six.text_type):
-            x = raw(x)
+            x = bytes_encode(x)
         return super(StrField, self).any2i(pkt, x)
 
     def i2repr(self, pkt, x):
@@ -898,7 +924,7 @@ class StrField(Field):
         if x is None:
             return b""
         if not isinstance(x, bytes):
-            return raw(x)
+            return bytes_encode(x)
         return x
 
     def addfield(self, pkt, s, val):
@@ -1150,7 +1176,7 @@ class NetBIOSNameField(StrFixedLenField):
 
     def i2m(self, pkt, x):
         len_pkt = self.length_from(pkt) // 2
-        x = raw(x)
+        x = bytes_encode(x)
         if x is None:
             x = b""
         x += b" " * len_pkt
@@ -2155,3 +2181,89 @@ class SecondsIntField(IntField):
         elif self.use_msec:
             x = x / 1e3
         return "%s sec" % x
+
+
+class ScalingField(Field):
+    """ Handle physical values which are scaled and/or offset for communication
+
+       Example:
+           >>> from scapy.packet import Packet
+           >>> class ScalingFieldTest(Packet):
+                   fields_desc = [ScalingField('data', 0, scaling=0.1, offset=-1, unit='mV')]  # noqa: E501
+           >>> ScalingFieldTest(data=10).show2()
+           ###[ ScalingFieldTest ]###
+             data= 10.0 mV
+           >>> hexdump(ScalingFieldTest(data=10))
+           0000  6E                                               n
+           >>> hexdump(ScalingFieldTest(data=b"\x6D"))
+           0000  6D                                               m
+           >>> ScalingFieldTest(data=b"\x6D").show2()
+           ###[ ScalingFieldTest ]###
+             data= 9.9 mV
+
+        bytes(ScalingFieldTest(...)) will produce 0x6E in this example.
+        0x6E is 110 (decimal). This is calculated through the scaling factor
+        and the offset. "data" was set to 10, which means, we want to transfer
+        the physical value 10 mV. To calculate the value, which has to be
+        sent on the bus, the offset has to subtracted and the scaling has to be
+        applied by division through the scaling factor.
+        bytes = (data - offset) / scaling
+        bytes = ( 10  -  (-1) ) /    0.1
+        bytes =  110 = 0x6E
+
+        If you want to force a certain internal value, you can assign a byte-
+        string to the field (data=b"\x6D"). If a string of a bytes object is
+        given to the field, no internal value conversion will be applied
+
+       :param name: field's name
+       :param default: default value for the field
+       :param scaling: scaling factor for the internal value conversion
+       :param unit: string for the unit representation of the internal value
+       :param offset: value to offset the internal value during conversion
+       :param ndigits: number of fractional digits for the internal conversion
+       :param fmt: struct.pack format used to parse and serialize the internal value from and to machine representation # noqa: E501
+       """
+    __slots__ = ["scaling", "unit", "offset", "ndigits"]
+
+    def __init__(self, name, default, scaling=1, unit="",
+                 offset=0, ndigits=3, fmt="B"):
+        self.scaling = scaling
+        self.unit = unit
+        self.offset = offset
+        self.ndigits = ndigits
+        Field.__init__(self, name, default, fmt)
+
+    def i2m(self, pkt, x):
+        if x is None:
+            x = 0
+        x = (x - self.offset) / self.scaling
+        if isinstance(x, float):
+            x = int(round(x))
+        return x
+
+    def m2i(self, pkt, x):
+        x = x * self.scaling + self.offset
+        if isinstance(x, float):
+            x = round(x, self.ndigits)
+        return x
+
+    def any2i(self, pkt, x):
+        if isinstance(x, str) or isinstance(x, bytes):
+            x = struct.unpack(self.fmt, bytes_encode(x))[0]
+            x = self.m2i(pkt, x)
+        return x
+
+    def i2repr(self, pkt, x):
+        return "%s %s" % (self.i2h(pkt, x), self.unit)
+
+    def randval(self):
+        value = super(ScalingField, self).randval()
+        if value is not None:
+            barrier1 = self.m2i(None, value.max)
+            barrier2 = self.m2i(None, value.min)
+
+            from math import ceil
+            min_value = ceil(min(barrier1, barrier2))
+            max_value = int(max(barrier1, barrier2))
+
+            return RandNum(min_value, max_value)

@@ -34,8 +34,8 @@ from scapy.fields import ByteField, LEShortField, BitField, LEShortEnumField, \
     ByteEnumField, X3BytesField, FlagsField, LELongField, StrField, \
     StrLenField, IntField, XByteField, LEIntField, StrFixedLenField, \
     LESignedIntField, ReversePadField, ConditionalField, PacketListField, \
-    ShortField, BitEnumField, XLEIntField, FieldLenField, LEFieldLenField, \
-    FieldListField, XStrFixedLenField, PacketField
+    ShortField, BitEnumField, FieldLenField, LEFieldLenField, \
+    FieldListField, XStrFixedLenField, PacketField, PadField, FCSField
 from scapy.ansmachine import AnsweringMachine
 from scapy.plist import PacketList
 from scapy.layers.l2 import Ether, LLC, MACField
@@ -184,7 +184,7 @@ class RadioTap(Packet):
                    FlagsField('present', None, -32, ['TSFT', 'Flags', 'Rate', 'Channel', 'FHSS', 'dBm_AntSignal',  # noqa: E501
                                                      'dBm_AntNoise', 'Lock_Quality', 'TX_Attenuation', 'dB_TX_Attenuation',  # noqa: E501
                                                      'dBm_TX_Power', 'Antenna', 'dB_AntSignal', 'dB_AntNoise',  # noqa: E501
-                                                     'RXFlags', 'b16', 'b17', 'b18', 'ChannelPlus', 'MCS', 'A_MPDU',  # noqa: E501
+                                                     'RXFlags', 'TXFlags', 'b17', 'b18', 'ChannelPlus', 'MCS', 'A_MPDU',  # noqa: E501
                                                      'VHT', 'timestamp', 'b24', 'b25', 'b26', 'b27', 'b28', 'b29',  # noqa: E501
                                                      'RadiotapNS', 'VendorNS', 'Ext']),  # noqa: E501
                    # Extended presence mask
@@ -209,6 +209,12 @@ class RadioTap(Packet):
                    ConditionalField(_RadiotapReversePadField(_dbmField("dBm_AntSignal", -256)), lambda pkt: pkt.present and pkt.present.dBm_AntSignal),  # noqa: E501
                    ConditionalField(_RadiotapReversePadField(_dbmField("dBm_AntNoise", -256)), lambda pkt: pkt.present and pkt.present.dBm_AntNoise),  # noqa: E501
                    ConditionalField(_RadiotapReversePadField(ByteField("Antenna", 0)), lambda pkt: pkt.present and pkt.present.Antenna),  # noqa: E501
+                   # RX Flags
+                   ConditionalField(_RadiotapReversePadField(FlagsField("RXFlags", None, -16, ["res1", "BAD_PLCP", "res2"])),   # noqa: E501
+                                    lambda pkt: pkt.present and pkt.present.RXFlags),  # noqa: E501#
+                   # TX Flags
+                   ConditionalField(_RadiotapReversePadField(FlagsField("TXFlags", None, -16, ["TX_FAIL", "CTS", "RTS", "NOACK", "NOSEQ"])),   # noqa: E501
+                                    lambda pkt: pkt.present and pkt.present.TXFlags),  # noqa: E501
                    # ChannelPlus
                    ConditionalField(
                        _RadiotapReversePadField(
@@ -282,7 +288,7 @@ class Dot11(Packet):
                                     "Reserved"]),
         BitField("proto", 0, 2),
         FlagsField("FCfield", 0, 8, ["to-DS", "from-DS", "MF", "retry",
-                                     "pw-mgt", "MD", "wep", "order"]),
+                                     "pw-mgt", "MD", "protected", "order"]),
         ShortField("ID", 0),
         MACField("addr1", ETHER_ANY),
         ConditionalField(
@@ -309,8 +315,11 @@ class Dot11(Packet):
     def guess_payload_class(self, payload):
         if self.type == 0x02 and (0x08 <= self.subtype <= 0xF and self.subtype != 0xD):  # noqa: E501
             return Dot11QoS
-        elif self.FCfield & 0x40:
-            return Dot11WEP
+        elif self.FCfield.protected:
+            # When a frame is handled by encryption, the Protected Frame bit
+            # (previously called WEP bit) is set to 1, and the Frame Body
+            # begins with the appropriate cryptographic header.
+            return Dot11Encrypted
         else:
             return Packet.guess_payload_class(self, payload)
 
@@ -349,26 +358,17 @@ class Dot11(Packet):
 
 class Dot11FCS(Dot11):
     name = "802.11-FCS"
-    fields_desc = Dot11.fields_desc + [XLEIntField("fcs", None)]  # Automatically moved to the end of the packet  # noqa: E501
+    match_subclass = True
+    fields_desc = Dot11.fields_desc + [FCSField("fcs", None, fmt="<I")]
 
     def compute_fcs(self, s):
         return struct.pack("!I", crc32(s) & 0xffffffff)[::-1]
 
     def post_build(self, p, pay):
-        # Switch payload and frame check sequence
-        return p[:-4] + pay + (p[-4:] if self.fcs is not None else self.compute_fcs(p[:-4] + pay))  # noqa: E501
-
-    def post_dissect(self, s):
-        self.raw_packet_cache = None  # Reset packet to allow post_build
-        return s
-
-    def pre_dissect(self, s):
-        # Get the frame check sequence
-        sty = orb(s[0])
-        ty = orb(s[1]) >> 2
-        fc = struct.unpack("!H", s[2:4])[0]
-        length = 12 + 6 * ((ty != 1 or sty in [0x8, 0x9, 0xa, 0xb, 0xe, 0xf]) + (ty in [0, 2]) + (ty == 2 and fc & 3 == 3))  # noqa: E501
-        return s[:length] + s[-4:] + s[length:-4]
+        p += pay
+        if self.fcs is None:
+            p = p[:-4] + self.compute_fcs(p)
+        return p
 
 
 class Dot11QoS(Packet):
@@ -381,8 +381,8 @@ class Dot11QoS(Packet):
 
     def guess_payload_class(self, payload):
         if isinstance(self.underlayer, Dot11):
-            if self.underlayer.FCfield & 0x40:
-                return Dot11WEP
+            if self.underlayer.FCfield.protected:
+                return Dot11Encrypted
         return Packet.guess_payload_class(self, payload)
 
 
@@ -403,8 +403,7 @@ status_code = {0: "success", 1: "failure", 10: "cannot-support-all-cap",
                16: "timeout", 17: "AP-full", 18: "rate-unsupported"}
 
 
-class Dot11Beacon(Packet):
-    name = "802.11 Beacon"
+class _Dot11NetStats(Packet):
     fields_desc = [LELongField("timestamp", 0),
                    LEShortField("beacon_interval", 0x0064),
                    FlagsField("cap", 0, 16, capability_list)]
@@ -421,13 +420,22 @@ class Dot11Beacon(Packet):
                 summary["ssid"] = plain_str(p.info)
             elif p.ID == 3:
                 summary["channel"] = ord(p.info)
+            elif isinstance(p, Dot11EltCountry):
+                summary["country"] = plain_str(p.country_string[:2])
+                country_descriptor_types = {
+                    b"I": "Indoor",
+                    b"O": "Outdoor"
+                }
+                summary["country_desc_type"] = country_descriptor_types.get(
+                    p.country_string[-1:]
+                )
             elif isinstance(p, Dot11EltRates):
                 summary["rates"] = p.rates
             elif isinstance(p, Dot11EltRSN):
                 crypto.add("WPA2")
             elif p.ID == 221:
                 if isinstance(p, Dot11EltMicrosoftWPA) or \
-                        p.info.startswith('\x00P\xf2\x01\x01\x00'):
+                        p.info.startswith(b'\x00P\xf2\x01\x01\x00'):
                     crypto.add("WPA")
             p = p.payload
         if not crypto:
@@ -437,6 +445,10 @@ class Dot11Beacon(Packet):
                 crypto.add("OPN")
         summary["crypto"] = crypto
         return summary
+
+
+class Dot11Beacon(_Dot11NetStats):
+    name = "802.11 Beacon"
 
 
 _dot11_info_elts_ids = {
@@ -580,7 +592,7 @@ class PMKIDListPacket(Packet):
 
 
 class Dot11EltRSN(Dot11Elt):
-    name = "RSN information"
+    name = "802.11 RSN information"
     fields_desc = [
         ByteField("ID", 48),
         ByteField("len", None),
@@ -608,12 +620,12 @@ class Dot11EltRSN(Dot11Elt):
             AKMSuite,
             count_from=lambda p: p.nb_akm_suites
         ),
-        BitField("pre_auth", 0, 1),
-        BitField("no_pairwise", 0, 1),
-        BitField("ptksa_replay_counter", 0, 2),
-        BitField("gtksa_replay_counter", 0, 2),
-        BitField("mfp_required", 0, 1),
         BitField("mfp_capable", 0, 1),
+        BitField("mfp_required", 0, 1),
+        BitField("gtksa_replay_counter", 0, 2),
+        BitField("ptksa_replay_counter", 0, 2),
+        BitField("no_pairwise", 0, 1),
+        BitField("pre_auth", 0, 1),
         BitField("reserved", 0, 8),
         ConditionalField(
             PacketField("pmkids", None, PMKIDListPacket),
@@ -625,8 +637,36 @@ class Dot11EltRSN(Dot11Elt):
     ]
 
 
+class Dot11EltCountryConstraintTriplet(Packet):
+    name = "802.11 Country Constraint Triplet"
+    fields_desc = [
+        ByteField("first_channel_number", 1),
+        ByteField("num_channels", 24),
+        _dbmField("mtp", -256)
+    ]
+
+    def extract_padding(self, s):
+        return b"", s
+
+
+class Dot11EltCountry(Dot11Elt):
+    name = "802.11 Country"
+    fields_desc = [
+        ByteField("ID", 7),
+        ByteField("len", None),
+        StrFixedLenField("country_string", b"\0\0\0", length=3),
+        PadField(
+            PacketListField("descriptors",
+                            [],
+                            Dot11EltCountryConstraintTriplet,
+                            length_from=lambda pkt: pkt.len - (pkt.len % 3)),
+            2, padwith=b"\x00"
+        )
+    ]
+
+
 class Dot11EltMicrosoftWPA(Dot11Elt):
-    name = "Microsoft WPA"
+    name = "802.11 Microsoft WPA"
     fields_desc = [
         ByteField("ID", 221),
         ByteField("len", None),
@@ -660,7 +700,7 @@ class Dot11EltMicrosoftWPA(Dot11Elt):
 
 
 class Dot11EltRates(Dot11Elt):
-    name = "Rates"
+    name = "802.11 Rates"
     fields_desc = [
         ByteField("ID", 1),
         ByteField("len", None),
@@ -674,7 +714,7 @@ class Dot11EltRates(Dot11Elt):
 
 
 class Dot11EltVendorSpecific(Dot11Elt):
-    name = "Vendor Specific"
+    name = "802.11 Vendor Specific"
     fields_desc = [
         ByteField("ID", 221),
         ByteField("len", None),
@@ -720,11 +760,8 @@ class Dot11ProbeReq(Packet):
     name = "802.11 Probe Request"
 
 
-class Dot11ProbeResp(Packet):
+class Dot11ProbeResp(_Dot11NetStats):
     name = "802.11 Probe Response"
-    fields_desc = [LELongField("timestamp", 0),
-                   LEShortField("beacon_interval", 0x0064),
-                   FlagsField("cap", 0, 16, capability_list)]
 
 
 class Dot11Auth(Packet):
@@ -744,7 +781,31 @@ class Dot11Deauth(Packet):
     fields_desc = [LEShortEnumField("reason", 1, reason_code)]
 
 
-class Dot11WEP(Packet):
+class Dot11Encrypted(Packet):
+    name = "802.11 Encrypted (unknown algorithm)"
+    fields_desc = [StrField("data", None)]
+
+    @classmethod
+    def dispatch_hook(cls, _pkt=None, *args, **kargs):
+        # Extracted from
+        # https://github.com/boundary/wireshark/blob/master/epan/dissectors/packet-ieee80211.c  # noqa: E501
+        KEY_EXTIV = 0x20
+        EXTIV_LEN = 8
+        if _pkt and len(_pkt) >= 3:
+            if (orb(_pkt[3]) & KEY_EXTIV) and (len(_pkt) >= EXTIV_LEN):
+                if orb(_pkt[1]) == (orb(_pkt[0]) | 0x20) & 0x7f:
+                    return Dot11TKIP
+                elif orb(_pkt[2]) == 0:
+                    return Dot11CCMP
+                else:
+                    # Unknown encryption algorithm
+                    return Dot11Encrypted
+            else:
+                return Dot11WEP
+        return conf.raw_layer
+
+
+class Dot11WEP(Dot11Encrypted):
     name = "802.11 WEP packet"
     fields_desc = [StrFixedLenField("iv", b"\0\0\0", 3),
                    ByteField("keyid", 0),
@@ -795,6 +856,26 @@ class Dot11WEP(Packet):
         if self.wepdata is None:
             p = self.encrypt(p, raw(pay))
         return p
+
+
+class Dot11TKIP(Dot11Encrypted):
+    name = "802.11 TKIP packet"
+    fields_desc = [
+        StrFixedLenField("iv", b"\x00" * 4, 4),
+        StrFixedLenField("ext_iv", b"\x00" * 4, 4),
+        StrField("data", None, remain=12),
+        StrFixedLenField("mic", b"\x00" * 8, 8),
+        IntField("icv", 0),
+    ]
+
+
+class Dot11CCMP(Dot11Encrypted):
+    name = "802.11 TKIP packet"
+    fields_desc = [
+        StrFixedLenField("ext_iv", b"\x00" * 4, 8),
+        StrField("data", None, remain=8),
+        StrFixedLenField("mic", b"\x00" * 8, 8),
+    ]
 
 
 class Dot11Ack(Packet):

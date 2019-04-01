@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 # This file is part of Scapy
 # See http://www.secdev.org/projects/scapy for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
@@ -26,10 +27,10 @@ import scapy.modules.six as six
 from scapy.modules.six.moves import range
 
 from scapy.config import conf
-from scapy.consts import DARWIN, WINDOWS
+from scapy.consts import DARWIN, WINDOWS, WINDOWS_XP
 from scapy.data import MTU, DLT_EN10MB
 from scapy.compat import orb, raw, plain_str, chb, bytes_base64,\
-    base64_bytes, hex_bytes, lambda_tuple_converter
+    base64_bytes, hex_bytes, lambda_tuple_converter, bytes_encode
 from scapy.error import log_runtime, Scapy_Exception, warning
 from scapy.pton_ntop import inet_pton
 
@@ -117,7 +118,7 @@ def hexdump(x, dump=False):
     :returns: a String only when dump=True
     """
     s = ""
-    x = raw(x)
+    x = bytes_encode(x)
     x_len = len(x)
     i = 0
     while i < x_len:
@@ -150,7 +151,7 @@ def linehexdump(x, onlyasc=0, onlyhex=0, dump=False):
     :returns: a String only when dump=True
     """
     s = ""
-    s = hexstr(raw(x), onlyasc=onlyasc, onlyhex=onlyhex, color=not dump)
+    s = hexstr(x, onlyasc=onlyasc, onlyhex=onlyhex, color=not dump)
     if dump:
         return s
     else:
@@ -169,7 +170,7 @@ def chexdump(x, dump=False):
     :param dump: print the view if False
     :returns: a String only if dump=True
     """
-    x = raw(x)
+    x = bytes_encode(x)
     s = ", ".join("%#04x" % orb(x) for x in x)
     if dump:
         return s
@@ -180,6 +181,7 @@ def chexdump(x, dump=False):
 @conf.commands.register
 def hexstr(x, onlyasc=0, onlyhex=0, color=False):
     """Build a fancy tcpdump like hex from bytes."""
+    x = bytes_encode(x)
     _sane_func = sane_color if color else sane
     s = []
     if not onlyasc:
@@ -197,8 +199,8 @@ def repr_hex(s):
 @conf.commands.register
 def hexdiff(x, y):
     """Show differences between 2 binary strings"""
-    x = raw(x)[::-1]
-    y = raw(y)[::-1]
+    x = bytes_encode(x)[::-1]
+    y = bytes_encode(y)[::-1]
     SUBST = 1
     INSERT = 1
     d = {(-1, -1): (0, (-1, -1))}
@@ -493,8 +495,13 @@ def valid_net6(addr):
     return valid_ip6(addr)
 
 
-def ltoa(x):
-    return inet_ntoa(struct.pack("!I", x & 0xffffffff))
+if WINDOWS_XP:
+    # That is a hell of compatibility :(
+    def ltoa(x):
+        return inet_ntoa(struct.pack("<I", x & 0xffffffff))
+else:
+    def ltoa(x):
+        return inet_ntoa(struct.pack("!I", x & 0xffffffff))
 
 
 def itom(x):
@@ -608,7 +615,7 @@ def do_graph(graph, prog=None, format=None, target=None, type=None, string=None,
             target = open(os.path.abspath(target), "wb")
     proc = subprocess.Popen("\"%s\" %s %s" % (prog, options or "", format or ""),  # noqa: E501
                             shell=True, stdin=subprocess.PIPE, stdout=target)
-    proc.stdin.write(raw(graph))
+    proc.stdin.write(bytes_encode(graph))
     proc.stdin.close()
     proc.wait()
     try:
@@ -704,7 +711,7 @@ class EnumElement:
         return self._key
 
     def __bytes__(self):
-        return raw(self.__str__())
+        return bytes_encode(self.__str__())
 
     def __hash__(self):
         return self._value
@@ -776,7 +783,7 @@ def load_object(fname):
 @conf.commands.register
 def corrupt_bytes(s, p=0.01, n=None):
     """Corrupt a given percentage or number of bytes from a string"""
-    s = array.array("B", raw(s))
+    s = array.array("B", bytes_encode(s))
     s_len = len(s)
     if n is None:
         n = max(1, int(s_len * p))
@@ -788,7 +795,7 @@ def corrupt_bytes(s, p=0.01, n=None):
 @conf.commands.register
 def corrupt_bits(s, p=0.01, n=None):
     """Flip a given percentage or number of bits from a string"""
-    s = array.array("B", raw(s))
+    s = array.array("B", bytes_encode(s))
     s_len = len(s) * 8
     if n is None:
         n = max(1, int(s_len * p))
@@ -1495,7 +1502,19 @@ def hexedit(pktlist):
 
 
 def get_terminal_width():
-    """Get terminal width if in a window"""
+    """Get terminal width (number of characters) if in a window.
+
+    Notice: this will try several methods in order to
+    support as many terminals and OS as possible.
+    """
+    # Let's first try using the official API
+    # (Python 3.3+)
+    if not six.PY2:
+        import shutil
+        sizex = shutil.get_terminal_size(fallback=(0, 0))[0]
+        if sizex != 0:
+            return sizex
+    # Backups / Python 2.7
     if WINDOWS:
         from ctypes import windll, create_string_buffer
         # http://code.activestate.com/recipes/440694-determine-size-of-console-window-on-windows/
@@ -1503,18 +1522,24 @@ def get_terminal_width():
         csbi = create_string_buffer(22)
         res = windll.kernel32.GetConsoleScreenBufferInfo(h, csbi)
         if res:
-            import struct
             (bufx, bufy, curx, cury, wattr,
              left, top, right, bottom, maxx, maxy) = struct.unpack("hhhhHhhhhhh", csbi.raw)  # noqa: E501
             sizex = right - left + 1
             # sizey = bottom - top + 1
             return sizex
-        else:
-            return None
+        return None
     else:
-        sizex = 0
+        # We have various methods
+        sizex = None
+        # COLUMNS is set on some terminals
         try:
-            import struct
+            sizex = int(os.environ['COLUMNS'])
+        except Exception:
+            pass
+        if sizex:
+            return sizex
+        # We can query TIOCGWINSZ
+        try:
             import fcntl
             import termios
             s = struct.pack('HHHH', 0, 0, 0, 0)
@@ -1522,15 +1547,7 @@ def get_terminal_width():
             sizex = struct.unpack('HHHH', x)[1]
         except IOError:
             pass
-        if not sizex:
-            try:
-                sizex = int(os.environ['COLUMNS'])
-            except Exception:
-                pass
-        if sizex:
-            return sizex
-        else:
-            return None
+        return sizex
 
 
 def pretty_list(rtlst, header, sortBy=0, borders=False):
@@ -1687,3 +1704,46 @@ def whois(ip_address):
         else:
             break
     return b"\n".join(lines[3:])
+
+
+
+
+def create_file_name(file_name, num, b):
+    num = str(num)
+    while len(num) < b:
+        num = '0' + num
+
+    return file_name + '_' + num + '.pcap'
+
+# 切分pcap文件
+def split_pcap(src_file_path, res_dir_path, batch_size, file_name_prefix=None):
+    if file_name_prefix is None:
+        src_file_name = src_file_path.split('/')[-1]
+        file_name_prefix = src_file_name[:src_file_name.rindex('.')]
+
+    pk_list = []
+    res_file_num = 0
+    with PcapReader(src_file_path) as rfdesc:
+        while True:
+            pk = rfdesc.read_packet()
+            if pk is None:
+                break
+            pk_list.append(pk)
+
+            if len(pk_list) == batch_size:
+                res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+                res_file_num += 1
+                res_file_path = os.path.join(res_dir_path, res_file_name)
+                with PcapWriter(res_file_path) as wfdesc:
+                    wfdesc.write(pk_list)
+                pk_list = []
+
+    if len(pk_list) != 0:
+        res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+        res_file_num += 1
+        res_file_path = os.path.join(res_dir_path, res_file_name)
+        with PcapWriter(res_file_path) as wfdesc:
+            wfdesc.write(pk_list)
+        pk_list = []
+
+    return

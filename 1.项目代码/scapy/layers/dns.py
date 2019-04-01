@@ -18,7 +18,7 @@ from scapy.fields import BitEnumField, BitField, ByteEnumField, ByteField, \
     ConditionalField, Field, FieldLenField, FlagsField, IntField, \
     PacketListField, ShortEnumField, ShortField, StrField, StrFixedLenField, \
     StrLenField
-from scapy.compat import orb, raw, chb
+from scapy.compat import orb, raw, chb, bytes_encode
 from scapy.ansmachine import AnsweringMachine
 from scapy.sendrecv import sr1
 from scapy.layers.inet import IP, DestIPField, UDP, TCP
@@ -115,9 +115,9 @@ def dns_compress(pkt):
                         if isinstance(field, DNSStrField) or \
                            (isinstance(field, RDataField) and
                            current.type in [2, 5, 12]):
-                                # Get the associated data and store it accordingly  # noqa: E501
-                                dat = current.getfieldval(field.name)
-                                yield current, field.name, dat
+                            # Get the associated data and store it accordingly  # noqa: E501
+                            dat = current.getfieldval(field.name)
+                            yield current, field.name, dat
                 current = current.payload
 
     def possible_shortens(dat):
@@ -252,7 +252,7 @@ class DNSRRField(StrField):
     def i2m(self, pkt, x):
         if x is None:
             return b""
-        return raw(x)
+        return bytes_encode(x)
 
     def decodeRR(self, name, s, p):
         ret = s[p:p + 10]
@@ -346,6 +346,7 @@ class RDataField(StrLenField):
         elif pkt.type == 16:  # TXT
             ret_s = b""
             for text in s:
+                text = bytes_encode(text)
                 # The initial string must be split into a list of strings
                 # prepended with theirs sizes.
                 while len(text) >= 255:
@@ -353,7 +354,7 @@ class RDataField(StrLenField):
                     text = text[255:]
                 # The remaining string is less than 255 bytes long
                 if len(text):
-                    ret_s += struct.pack("!B", len(text)) + raw(text)
+                    ret_s += struct.pack("!B", len(text)) + text
             s = ret_s
         elif pkt.type == 28:  # AAAA
             if s:

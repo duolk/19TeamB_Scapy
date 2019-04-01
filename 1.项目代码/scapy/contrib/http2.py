@@ -20,10 +20,13 @@
 """http2 Module
 Implements packets and fields required to encode/decode HTTP/2 Frames
 and HPack encoded headers
-
-scapy.contrib.status=loads
-scapy.contrib.description=HTTP/2 (RFC 7540, RFC 7541)
 """
+
+# scapy.contrib.status=loads
+# scapy.contrib.description=HTTP/2 (RFC 7540, RFC 7541)
+
+# base_classes triggers an unwanted import warning
+# flake8: noqa: F821
 
 from __future__ import absolute_import
 from __future__ import print_function
@@ -33,7 +36,7 @@ import sys
 from io import BytesIO
 import struct
 import scapy.modules.six as six
-from scapy.compat import raw, plain_str, bytes_hex, orb, chb
+from scapy.compat import raw, plain_str, bytes_hex, orb, chb, bytes_encode
 
 # Only required if using mypy-lang for static typing
 # Most symbols are used in mypy-interpreted "comments".
@@ -391,7 +394,7 @@ class AbstractUVarIntField(fields.Field):
             return s[0] + chb((s[2] << self.size) + self._max_value) + self.i2m(pkt, val)[1:]  # noqa: E501
         # This AbstractUVarIntField is only one byte long; setting the prefix value  # noqa: E501
         # and appending the resulting byte to the string
-        return chb(s[0]) + chb((s[2] << self.size) + orb(self.i2m(pkt, val)))
+        return s[0] + chb((s[2] << self.size) + orb(self.i2m(pkt, val)))
 
     @staticmethod
     def _detect_bytelen_from_str(s):
@@ -649,7 +652,7 @@ class HPackStringsInterface(ABC, Sized):
 
     def __bytes__(self):
         r = self.__str__()
-        return r if isinstance(r, bytes) else raw(r)
+        return bytes_encode(r)
 
     @abc.abstractmethod
     def origin(self):
@@ -2019,7 +2022,7 @@ class H2Frame(packet.Packet):
                 else:
                     return H2PaddedHeadersFrame
             elif H2HeadersFrame.flags[H2HeadersFrame.PRIORITY_FLAG].short in self.getfieldval('flags'):  # noqa: E501
-                    return H2PriorityHeadersFrame
+                return H2PriorityHeadersFrame
             return H2HeadersFrame
 
         if t == H2PriorityFrame.type_id:
@@ -2166,7 +2169,7 @@ class HPackHdrEntry(Sized):
             return "{}: {}".format(self._name, self._value)
 
     def __bytes__(self):
-        return raw(self.__str__())
+        return bytes_encode(self.__str__())
 
 
 class HPackHdrTable(Sized):

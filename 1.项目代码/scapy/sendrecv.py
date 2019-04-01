@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 # This file is part of Scapy
 # See http://www.secdev.org/projects/scapy for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
@@ -11,6 +12,7 @@ from __future__ import absolute_import, print_function
 import itertools
 import threading
 import os
+import re
 import socket
 import subprocess
 import time
@@ -21,7 +23,8 @@ from scapy.data import ETH_P_ALL
 from scapy.config import conf
 from scapy.error import warning
 from scapy.packet import Packet, Gen
-from scapy.utils import get_temp_file, PcapReader, tcpdump, wrpcap
+from scapy.utils import get_temp_file, tcpdump, wrpcap, \
+    ContextManagerSubprocess, PcapReader, PcapWriter
 from scapy import plist
 from scapy.error import log_runtime, log_interactive
 from scapy.base_classes import SetGen
@@ -121,8 +124,8 @@ def _sndrcv_rcv(pks, hsent, stopevent, nbrecv, notans, verbose, chainCC,
                                 notans -= 1
                             sentpkt._answered = 1
                         break
-            del r
             if notans == 0 and not multi:
+                del r
                 break
             if not ok:
                 if verbose > 1:
@@ -130,6 +133,7 @@ def _sndrcv_rcv(pks, hsent, stopevent, nbrecv, notans, verbose, chainCC,
                 nbrecv += 1
                 if conf.debug_match:
                     debug.recv.append(r)
+            del r
     except KeyboardInterrupt:
         if chainCC:
             raise
@@ -295,7 +299,6 @@ def __gen_send(s, x, inter=0, loop=0, count=None, verbose=None, realtime=None, r
                 loop += 1
     except KeyboardInterrupt:
         pass
-    s.close()
     if verbose:
         print("\nSent %i packets." % n)
     if return_packets:
@@ -303,29 +306,39 @@ def __gen_send(s, x, inter=0, loop=0, count=None, verbose=None, realtime=None, r
 
 
 @conf.commands.register
-def send(x, inter=0, loop=0, count=None, verbose=None, realtime=None, return_packets=False, socket=None,  # noqa: E501
-         *args, **kargs):
+def send(x, inter=0, loop=0, count=None,
+         verbose=None, realtime=None,
+         return_packets=False, socket=None, *args, **kargs):
     """Send packets at layer 3
 send(packets, [inter=0], [loop=0], [count=None], [verbose=conf.verb], [realtime=None], [return_packets=False],  # noqa: E501
      [socket=None]) -> None"""
-    if socket is None:
-        socket = conf.L3socket(*args, **kargs)
-    return __gen_send(socket, x, inter=inter, loop=loop, count=count, verbose=verbose,  # noqa: E501
-                      realtime=realtime, return_packets=return_packets)
+    need_closing = socket is None
+    socket = socket or conf.L3socket(*args, **kargs)
+    results = __gen_send(socket, x, inter=inter, loop=loop,
+                         count=count, verbose=verbose,
+                         realtime=realtime, return_packets=return_packets)
+    if need_closing:
+        socket.close()
+    return results
 
 
 @conf.commands.register
-def sendp(x, inter=0, loop=0, iface=None, iface_hint=None, count=None, verbose=None, realtime=None,  # noqa: E501
+def sendp(x, inter=0, loop=0, iface=None, iface_hint=None, count=None,
+          verbose=None, realtime=None,
           return_packets=False, socket=None, *args, **kargs):
     """Send packets at layer 2
 sendp(packets, [inter=0], [loop=0], [iface=None], [iface_hint=None], [count=None], [verbose=conf.verb],  # noqa: E501
       [realtime=None], [return_packets=False], [socket=None]) -> None"""
     if iface is None and iface_hint is not None and socket is None:
         iface = conf.route.route(iface_hint)[0]
-    if socket is None:
-        socket = conf.L2socket(iface=iface, *args, **kargs)
-    return __gen_send(socket, x, inter=inter, loop=loop, count=count,
-                      verbose=verbose, realtime=realtime, return_packets=return_packets)  # noqa: E501
+    need_closing = socket is None
+    socket = socket or conf.L2socket(iface=iface, *args, **kargs)
+    results = __gen_send(socket, x, inter=inter, loop=loop,
+                         count=count, verbose=verbose,
+                         realtime=realtime, return_packets=return_packets)
+    if need_closing:
+        socket.close()
+    return results
 
 
 @conf.commands.register
@@ -366,25 +379,25 @@ def sendpfast(x, pps=None, mbps=None, realtime=None, loop=0, file_cache=False, i
     argv.append(f)
     wrpcap(f, x)
     results = None
-    try:
-        log_runtime.info(argv)
-        with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as cmd:  # noqa: E501
+    with ContextManagerSubprocess("sendpfast()", conf.prog.tcpreplay):
+        try:
+            cmd = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        except KeyboardInterrupt:
+            log_interactive.info("Interrupted by user")
+        except Exception:
+            os.unlink(f)
+            raise
+        else:
             stdout, stderr = cmd.communicate()
-            log_runtime.info(stdout)
-            log_runtime.warning(stderr)
+            if stderr:
+                log_runtime.warning(stderr.decode())
             if parse_results:
                 results = _parse_tcpreplay_result(stdout, stderr, argv)
-
-    except KeyboardInterrupt:
-        log_interactive.info("Interrupted by user")
-    except Exception:
-        if conf.interactive:
-            log_interactive.error("Cannot execute [%s]", argv[0], exc_info=True)  # noqa: E501
-        else:
-            raise
-    finally:
-        os.unlink(f)
-        return results
+            elif conf.verb > 2:
+                log_runtime.info(stdout.decode())
+    os.unlink(f)
+    return results
 
 
 def _parse_tcpreplay_result(stdout, stderr, argv):
@@ -398,26 +411,46 @@ def _parse_tcpreplay_result(stdout, stderr, argv):
     :return: dictionary containing the results
     """
     try:
-        results_dict = {}
-        stdout = plain_str(stdout).replace("\nRated: ", "\t\tRated: ").replace("\t", "").split("\n")  # noqa: E501
-        stderr = plain_str(stderr).replace("\t", "").split("\n")
-        actual = [x for x in stdout[0].split(" ") if x]
-
-        results_dict["packets"] = int(actual[1])
-        results_dict["bytes"] = int(actual[3][1:])
-        results_dict["time"] = float(actual[7])
-        results_dict["bps"] = float(actual[10])
-        results_dict["mbps"] = float(actual[12])
-        results_dict["pps"] = float(actual[14])
-        results_dict["attempted"] = int(stdout[2].split(" ")[-1:][0])
-        results_dict["successful"] = int(stdout[3].split(" ")[-1:][0])
-        results_dict["failed"] = int(stdout[4].split(" ")[-1:][0])
-        results_dict["retried_enobufs"] = int(stdout[5].split(" ")[-1:][0])
-        results_dict["retried_eagain"] = int(stdout[6].split(" ")[-1][0])
-        results_dict["command"] = str(argv)
-        results_dict["warnings"] = stderr[:len(stderr) - 1]
-        return results_dict
+        results = {}
+        stdout = plain_str(stdout).lower()
+        stderr = plain_str(stderr).strip().split("\n")
+        elements = {
+            "actual": (int, int, float),
+            "rated": (float, float, float),
+            "flows": (int, float, int, int),
+            "attempted": (int,),
+            "successful": (int,),
+            "failed": (int,),
+            "truncated": (int,),
+            "retried packets (eno": (int,),
+            "retried packets (eag": (int,),
+        }
+        multi = {
+            "actual": ("packets", "bytes", "time"),
+            "rated": ("bps", "mbps", "pps"),
+            "flows": ("flows", "fps", "flow_packets", "non_flow"),
+            "retried packets (eno": ("retried_enobufs",),
+            "retried packets (eag": ("retried_eagain",),
+        }
+        float_reg = r"([0-9]*\.[0-9]+|[0-9]+)"
+        int_reg = r"([0-9]+)"
+        any_reg = r"[^0-9]*"
+        r_types = {int: int_reg, float: float_reg}
+        for line in stdout.split("\n"):
+            line = line.strip()
+            for elt, _types in elements.items():
+                if line.startswith(elt):
+                    regex = any_reg.join([r_types[x] for x in _types])
+                    matches = re.search(regex, line)
+                    for i, typ in enumerate(_types):
+                        name = multi.get(elt, [elt])[i]
+                        results[name] = typ(matches.group(i + 1))
+        results["command"] = " ".join(argv)
+        results["warnings"] = stderr[:-1]
+        return results
     except Exception as parse_exception:
+        if not conf.interactive:
+            raise
         log_runtime.error("Error parsing output: " + str(parse_exception))
         return {}
 
@@ -994,3 +1027,150 @@ def tshark(*args, **kargs):
         i[0] += 1
     sniff(prn=_cb, store=False, *args, **kargs)
     print("\n%d packet%s captured" % (i[0], 's' if i[0] > 1 else ''))
+
+
+def create_file_name(file_name, num, b):
+    num = str(num)
+    while len(num) < b:
+        num = '0' + num
+
+    return file_name + '_' + num + '.pcap'
+
+# 监听存储
+def sniff_store(res_dir_path, batch_size, file_name_prefix, count=0, offline=None, prn=None, lfilter=None,
+          L2socket=None, timeout=None, opened_socket=None,
+          stop_filter=None, iface=None, started_callback=None, *arg, **karg):
+    c = 0
+    sniff_sockets = {}  # socket: label dict
+    if opened_socket is not None:
+        if isinstance(opened_socket, list):
+            sniff_sockets.update((s, "socket%d" % i)
+                                 for i, s in enumerate(opened_socket))
+        elif isinstance(opened_socket, dict):
+            sniff_sockets.update((s, label)
+                                 for s, label in six.iteritems(opened_socket))
+        else:
+            sniff_sockets[opened_socket] = "socket0"
+    if offline is not None:
+        flt = karg.get('filter')
+        if isinstance(offline, list):
+            sniff_sockets.update((PcapReader(
+                fname if flt is None else
+                tcpdump(fname, args=["-w", "-", flt], getfd=True)
+            ), fname) for fname in offline)
+        elif isinstance(offline, dict):
+            sniff_sockets.update((PcapReader(
+                fname if flt is None else
+                tcpdump(fname, args=["-w", "-", flt], getfd=True)
+            ), label) for fname, label in six.iteritems(offline))
+        else:
+            sniff_sockets[PcapReader(
+                offline if flt is None else
+                tcpdump(offline, args=["-w", "-", flt], getfd=True)
+            )] = offline
+    if not sniff_sockets or iface is not None:
+        if L2socket is None:
+            L2socket = conf.L2listen
+        if isinstance(iface, list):
+            sniff_sockets.update(
+                (L2socket(type=ETH_P_ALL, iface=ifname, *arg, **karg), ifname)
+                for ifname in iface
+            )
+        elif isinstance(iface, dict):
+            sniff_sockets.update(
+                (L2socket(type=ETH_P_ALL, iface=ifname, *arg, **karg), iflabel)
+                for ifname, iflabel in six.iteritems(iface)
+            )
+        else:
+            sniff_sockets[L2socket(type=ETH_P_ALL, iface=iface,
+                                   *arg, **karg)] = iface
+
+    if timeout is not None:
+        stoptime = time.time() + timeout
+    remain = None
+
+    # Get select information from the sockets
+    _main_socket = next(iter(sniff_sockets))
+    read_allowed_exceptions = _main_socket.read_allowed_exceptions
+    select_func = _main_socket.select
+    # We check that all sockets use the same select(), or raise a warning
+    if not all(select_func == sock.select for sock in sniff_sockets):
+        warning("Warning: inconsistent socket types ! The used select function"
+                "will be the one of the first socket")
+    # Now let's build the select function, used later on
+    _select = lambda sockets, remain: select_func(sockets, remain)[0]
+
+
+
+    lst = []
+    res_file_num = 0
+    try:
+        if started_callback:
+            started_callback()
+        while sniff_sockets:
+            if timeout is not None:
+                remain = stoptime - time.time()
+                if remain <= 0:
+                    break
+            for s in _select(sniff_sockets, remain):
+                try:
+                    p = s.recv()
+                except socket.error as ex:
+                    log_runtime.warning("Socket %s failed with '%s' and thus"
+                                        " will be ignored" % (s, ex))
+                    del sniff_sockets[s]
+                    continue
+                except read_allowed_exceptions:
+                    continue
+                if p is None:
+                    try:
+                        if s.promisc:
+                            continue
+                    except AttributeError:
+                        pass
+                    del sniff_sockets[s]
+                    break
+                if lfilter and not lfilter(p):
+                    continue
+                p.sniffed_on = sniff_sockets[s]
+
+
+                lst.append(p)
+                # 存储报文
+                if len(lst) == batch_size:
+                    res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+                    res_file_num += 1
+                    res_file_path = os.path.join(res_dir_path, res_file_name)
+                    with PcapWriter(res_file_path) as wfdesc:
+                        wfdesc.write(lst)
+                    lst = []
+
+
+
+                c += 1
+                if prn:
+                    r = prn(p)
+                    if r is not None:
+                        print(r)
+                if stop_filter and stop_filter(p):
+                    sniff_sockets = []
+                    break
+                if 0 < count <= c:
+                    sniff_sockets = []
+                    break
+    except KeyboardInterrupt:
+        pass
+    if opened_socket is None:
+        for s in sniff_sockets:
+            s.close()
+
+    if len(lst) != 0:
+        res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+        res_file_num += 1
+        res_file_path = os.path.join(res_dir_path, res_file_name)
+        with PcapWriter(res_file_path) as wfdesc:
+            wfdesc.write(lst)
+        lst = []
+
+
+    return

@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 # This file is part of Scapy
 # See http://www.secdev.org/projects/scapy for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
@@ -18,13 +19,13 @@ import types
 from scapy.fields import StrField, ConditionalField, Emph, PacketListField, \
     BitField, MultiEnumField, EnumField, FlagsField, MultipleTypeField
 from scapy.config import conf, _version_checker
-from scapy.compat import raw, orb
+from scapy.compat import raw, orb, bytes_encode
 from scapy.base_classes import BasePacket, Gen, SetGen, Packet_metaclass, \
     _CanvasDumpExtended
 from scapy.volatile import VolatileValue, RandField
 from scapy.utils import import_hexcap, tex_escape, colgen, issubtype, \
     pretty_list
-from scapy.error import Scapy_Exception, log_runtime
+from scapy.error import Scapy_Exception, log_runtime, warning
 from scapy.extlib import PYX
 import scapy.modules.six as six
 
@@ -74,6 +75,7 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
     payload_guess = []
     show_indent = 1
     show_summary = True
+    match_subclass = False
     class_dont_cache = dict()
     class_packetfields = dict()
     class_default_fields = dict()
@@ -162,6 +164,30 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
             self.post_transforms = []
         else:
             self.post_transforms = [post_transform]
+
+
+    # 获取协议类型
+    def get_pro_type(self, flag=0):
+        pro_list = []
+        final_pro = ''
+        pk = self
+        while True:
+            pro_list.append(pk.name)
+            if pk.name == 'NoPayload':
+                break
+            elif pk.name == 'Padding' or pk.name == 'Raw':
+                pass
+            else:
+                final_pro = pk.name
+            pk = pk.payload
+
+
+        if flag == 0 :
+            return final_pro
+        elif flag == 1:
+            return pro_list
+        else:
+            return final_pro, pro_list
 
     def init_fields(self):
         """
@@ -770,7 +796,8 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
         return s
 
     def do_dissect(self, s):
-        s = raw(s)
+        if not isinstance(s, bytes):
+            s = bytes_encode(s)
         _raw = s
         self.raw_packet_cache_fields = {}
         # Temporary value, used by getfield() in some advanced cases (eg: dot11)  # noqa: E501
@@ -786,7 +813,6 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
             if f.islist or f.holds_packets or f.ismutable:
                 self.raw_packet_cache_fields[f.name] = f.do_copy(fval)
             self.fields[f.name] = fval
-        assert(_raw.endswith(raw(s)))
         del self._tmp_dissect_pos
         self.raw_packet_cache = _raw[:-len(s)] if s else _raw
         self.explicit = 1
@@ -1012,10 +1038,12 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
                         return ret
         return self.payload.haslayer(cls)
 
-    def getlayer(self, cls, nb=1, _track=None, _subclass=False, **flt):
+    def getlayer(self, cls, nb=1, _track=None, _subclass=None, **flt):
         """Return the nb^th layer that is an instance of cls, matching flt
 values.
         """
+        if _subclass is None:
+            _subclass = self.match_subclass or None
         if _subclass:
             match = lambda cls1, cls2: issubclass(cls1, cls2)
         else:
@@ -1630,6 +1658,14 @@ def explore(layer=None):
     params:
      - layer: If specified, the function will explore the layer. If not,
               the GUI mode will be activated, to browse the available layers
+
+    examples:
+      >>> explore()  # Launches the GUI
+      >>> explore("dns")  # Explore scapy.layers.dns
+      >>> explore("http2")  # Explore scapy.contrib.http2
+      >>> explore(scapy.layers.bluetooth4LE)
+
+    Note: to search a packet by name, use ls("name") rather than explore.
     """
     if layer is None:  # GUI MODE
         if not conf.interactive:
@@ -1647,10 +1683,10 @@ def explore(layer=None):
             raise ImportError("prompt_toolkit >= 2.0.0 is required !")
         # Only available with prompt_toolkit > 2.0, not released on PyPi yet
         from prompt_toolkit.shortcuts.dialogs import radiolist_dialog, \
-            yes_no_dialog
+            button_dialog
         from prompt_toolkit.formatted_text import HTML
         # 1 - Ask for layer or contrib
-        is_layer = yes_no_dialog(
+        action = button_dialog(
             title="Scapy v%s" % conf.version,
             text=HTML(
                 six.text_type(
@@ -1658,17 +1694,20 @@ def explore(layer=None):
                     ' you want to explore:</style>'
                 )
             ),
-            yes_text=six.text_type("Layers"),
-            no_text=six.text_type("Contribs"))
+            buttons=[
+                (six.text_type("Layers"), "layers"),
+                (six.text_type("Contribs"), "contribs"),
+                (six.text_type("Cancel"), "cancel")
+            ])
         # 2 - Retrieve list of Packets
-        if is_layer is True:
+        if action == "layers":
             # Get all loaded layers
             _radio_values = conf.layers.layers()
             # Restrict to layers-only (not contribs) + packet.py and asn1*.py
             _radio_values = [x for x in _radio_values if ("layers" in x[0] or
                                                           "packet" in x[0] or
                                                           "asn1" in x[0])]
-        elif is_layer is False:
+        elif action == "contribs":
             # Get all existing contribs
             from scapy.main import list_contrib
             _radio_values = list_contrib(ret=True)
@@ -1677,7 +1716,7 @@ def explore(layer=None):
             # Remove very specific modules
             _radio_values = [x for x in _radio_values if not ("can" in x[0])]
         else:
-            # Escape was pressed
+            # Escape/Cancel was pressed
             return
         # Python 2 compat
         if six.PY2:
@@ -1697,7 +1736,7 @@ def explore(layer=None):
         if result is None:
             return  # User pressed "Cancel"
         # 4 - (Contrib only): load contrib
-        if not is_layer:
+        if action == "contribs":
             from scapy.main import load_contrib
             load_contrib(result)
             result = "scapy.contrib." + result
@@ -1722,6 +1761,10 @@ def explore(layer=None):
                     result = result_contrib
                 else:
                     raise Scapy_Exception("Unknown scapy module '%s'" % layer)
+        else:
+            warning("Wrong usage ! Check out help(explore)")
+            return
+
     # COMMON PART
     # Get the list of all Packets contained in that module
     try:
@@ -1767,10 +1810,8 @@ def ls(obj=None, case_sensitive=False, verbose=False):
         for layer in all_layers:
             print("%-10s : %s" % (layer.__name__, layer._name))
         if tip and conf.interactive:
-            print()
-            print("TIP: You may use explore() to navigate through all "
+            print("\nTIP: You may use explore() to navigate through all "
                   "layers using a clear GUI")
-
     else:
         is_pkt = isinstance(obj, Packet)
         if issubtype(obj, Packet) or is_pkt:

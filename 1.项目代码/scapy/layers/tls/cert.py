@@ -44,7 +44,7 @@ from scapy.layers.x509 import (X509_SubjectPublicKeyInfo,
                                X509_Cert, X509_CRL)
 from scapy.layers.tls.crypto.pkcs1 import pkcs_os2ip, _get_hash, \
     _EncryptAndVerifyRSA, _DecryptAndSignRSA
-from scapy.compat import raw
+from scapy.compat import raw, bytes_encode
 if conf.crypto_valid:
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import serialization
@@ -132,7 +132,7 @@ class _PKIObjMaker(type):
 
         if obj_path is None:
             raise Exception(error_msg)
-        obj_path = raw(obj_path)
+        obj_path = bytes_encode(obj_path)
 
         if (b'\x00' not in obj_path) and os.path.isfile(obj_path):
             _size = os.path.getsize(obj_path)
@@ -407,6 +407,13 @@ class _PrivKeyFactory(_PKIObjMaker):
         return obj
 
 
+class _Raw_ASN1_BIT_STRING(ASN1_BIT_STRING):
+    """A ASN1_BIT_STRING that ignores BER encoding"""
+    def __bytes__(self):
+        return self.val_readable
+    __str__ = __bytes__
+
+
 class PrivKey(six.with_metaclass(_PrivKeyFactory, object)):
     """
     Parent class for both PrivKeyRSA and PrivKeyECDSA.
@@ -433,7 +440,7 @@ class PrivKey(six.with_metaclass(_PrivKeyFactory, object)):
         c = X509_Cert()
         c.tbsCertificate = tbsCert
         c.signatureAlgorithm = sigAlg
-        c.signatureValue = ASN1_BIT_STRING(sigVal, readable=True)
+        c.signatureValue = _Raw_ASN1_BIT_STRING(sigVal, readable=True)
         return c
 
     def resignCert(self, cert):
