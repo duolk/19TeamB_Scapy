@@ -1340,6 +1340,9 @@ class PcapWriter(RawPcapWriter):
                                     wirelen=packet.wirelen or caplen)
 
 
+
+
+
 @conf.commands.register
 def import_hexcap():
     """Imports a tcpdump like hexadecimal view
@@ -1707,43 +1710,197 @@ def whois(ip_address):
 
 
 
-
-def create_file_name(file_name, num, b):
+'''
+函数作用：创建文件
+'''
+def create_file_name(file_name, num):
     num = str(num)
-    while len(num) < b:
-        num = '0' + num
-
     return file_name + '_' + num + '.pcap'
 
-# 切分pcap文件
-def split_pcap(src_file_path, res_dir_path, batch_size, file_name_prefix=None):
+
+class PcapWriter_sniff(RawPcapWriter):
+    """A stream PCAP writer with more control than wrpcap()"""
+
+    def _write_header(self, pkt):
+        if isinstance(pkt, tuple) and pkt:
+            pkt = pkt[0]
+        if self.linktype is None:
+            try:
+                self.linktype = conf.l2types[pkt.__class__]
+            except KeyError:
+                warning("PcapWriter: unknown LL type for %s. Using type 1 (Ethernet)", pkt.__class__.__name__)  # noqa: E501
+                self.linktype = DLT_EN10MB
+        RawPcapWriter._write_header(self, pkt)
+
+    def _write_packet(self, packet):
+        if isinstance(packet, tuple):
+            for pkt in packet:
+                self._write_packet(pkt)
+            return
+        sec = int(packet['time'])
+        usec = int(round((packet['time'] - sec) * (1000000000 if self.nano else 1000000)))  # noqa: E501
+        rawpkt = packet['val']
+        caplen = len(rawpkt)
+        RawPcapWriter._write_packet(self, rawpkt, sec=sec, usec=usec, caplen=caplen,  # noqa: E501
+                                    wirelen=caplen)
+
+
+class NoAnalysis_PcapReader(six.with_metaclass(PcapReader_metaclass)):
+    PacketMetadata = collections.namedtuple("PacketMetadata", ["sec", "usec", "wirelen", "caplen"])  # noqa: E501
+
+    # 读取pcap文件头部信息
+    def __init__(self, filename, fdesc, magic):
+        self.filename = filename
+        self.f = fdesc
+
+        if magic == b"\xa1\xb2\xc3\xd4":  # big endian
+            self.endian = ">"
+        elif magic == b"\xd4\xc3\xb2\xa1":  # little endian
+            self.endian = "<"
+        elif magic == b"\xa1\xb2\x3c\x4d":  # big endian, nanosecond-precision
+            self.endian = ">"
+        elif magic == b"\x4d\x3c\xb2\xa1":  # little endian, nanosecond-precision  # noqa: E501
+            self.endian = "<"
+        else:
+            raise Scapy_Exception(
+                "Not a pcap capture file (bad magic: %r)" % magic
+            )
+        hdr = self.f.read(20)
+
+        if len(hdr) < 20:
+            raise Scapy_Exception("Invalid pcap file (too short)")
+
+        # 保存头部完整的字节码
+        self.pcap_head = magic + hdr
+
+
+    # 读取数据块的头部和报文，返回完整的字节码
+    def read_packet(self, size=MTU):
+        hdr = self.f.read(16)
+        if len(hdr) < 16:
+            return (None,None)
+        sec, usec, caplen, wirelen = struct.unpack(self.endian + "IIII", hdr)
+        return (hdr, self.f.read(caplen)[:size])
+
+    def get_pcap_head(self):
+        return self.pcap_head
+
+    def close(self):
+        return self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, tracback):
+        self.close()
+
+
+class NoAnalysis_PcapWriter():
+    def __init__(self, filename):
+        if isinstance(filename, six.string_types):
+            self.filename = filename
+            self.f = open(filename, "wb")
+        else:
+            self.f = filename
+            self.filename = getattr(filename, "name", "No name")
+
+
+    def _write_header(self, pcap_head):
+        self.f.write(pcap_head)
+        self.f.flush()
+
+    def write(self, pcap_head, pkt_list):
+        self._write_header(pcap_head)
+        for p in pkt_list:
+            self._write_packet(p)
+        self.f.flush()
+
+    def _write_packet(self, packet):  # noqa: E501
+        hdr, pkt = packet
+        self.f.write(hdr)
+        self.f.write(pkt)
+
+    def flush(self):
+        return self.f.flush()
+
+    def close(self):
+        return self.f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, tracback):
+        self.flush()
+        self.close()
+
+
+
+'''
+函数作用：切分pcap文件
+参数：
+    mode：切分方式，0先解析后存储，可以指定存储格式；1不解析直接存储，无法指定存储格式
+    file_name_prefix：文件名前缀
+    linktype:   链路类型，取值范围为scapy/data.py里的DLT_...
+    gendianness: 指定存储的方式：大小端 (little:"<", big:">").
+    sync: 不缓存数据，True的话就是每写一条报文清理一次缓存
+'''
+def split_pcap(src_file_path, res_dir_path, batch_size, mode=0, file_name_prefix=None, linktype=None, endianness=""):
+    # 设置结果文件名前缀
     if file_name_prefix is None:
         src_file_name = src_file_path.split('/')[-1]
         file_name_prefix = src_file_name[:src_file_name.rindex('.')]
 
-    pk_list = []
-    res_file_num = 0
-    with PcapReader(src_file_path) as rfdesc:
-        while True:
-            pk = rfdesc.read_packet()
-            if pk is None:
-                break
-            pk_list.append(pk)
+    if mode == 0:
+        pk_list = []
+        res_file_num = 0
+        with PcapReader(src_file_path) as rfdesc:
+            while True:
+                pk = rfdesc.read_packet()
+                if pk is None:
+                    break
+                pk_list.append(pk)
 
-            if len(pk_list) == batch_size:
-                res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+                if len(pk_list) == batch_size:
+                    res_file_name = create_file_name(file_name_prefix, res_file_num)
+                    res_file_num += 1
+                    res_file_path = os.path.join(res_dir_path, res_file_name)
+                    with PcapWriter(res_file_path, linktype=linktype, endianness=endianness) as wfdesc:
+                        wfdesc.write(pk_list)
+                    pk_list = []
+
+        if len(pk_list) != 0:
+            res_file_name = create_file_name(file_name_prefix, res_file_num)
+            res_file_num += 1
+            res_file_path = os.path.join(res_dir_path, res_file_name)
+            with PcapWriter(res_file_path) as wfdesc:
+                wfdesc.write(pk_list)
+            pk_list = []
+    else:
+        pk_list = []
+        res_file_num = 0
+        pcap_head = ''
+        with NoAnalysis_PcapReader(src_file_path) as rfdesc:
+            pcap_head = rfdesc.get_pcap_head()
+            while True:
+                hdr, pk = rfdesc.read_packet()
+                if pk is None:
+                    break
+                pk_list.append((hdr, pk))
+
+                if len(pk_list) == batch_size:
+                    res_file_name = create_file_name(file_name_prefix, res_file_num)
+                    res_file_num += 1
+                    res_file_path = os.path.join(res_dir_path, res_file_name)
+                    with NoAnalysis_PcapWriter(res_file_path) as wfdesc:
+                        wfdesc.write(pcap_head, pk_list)
+                    pk_list = []
+
+            if len(pk_list) != 0:
+                res_file_name = create_file_name(file_name_prefix, res_file_num)
                 res_file_num += 1
                 res_file_path = os.path.join(res_dir_path, res_file_name)
-                with PcapWriter(res_file_path) as wfdesc:
-                    wfdesc.write(pk_list)
+                with NoAnalysis_PcapWriter(res_file_path) as wfdesc:
+                    wfdesc.write(pcap_head, pk_list)
                 pk_list = []
-
-    if len(pk_list) != 0:
-        res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
-        res_file_num += 1
-        res_file_path = os.path.join(res_dir_path, res_file_name)
-        with PcapWriter(res_file_path) as wfdesc:
-            wfdesc.write(pk_list)
-        pk_list = []
 
     return

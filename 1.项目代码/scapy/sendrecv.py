@@ -24,7 +24,7 @@ from scapy.config import conf
 from scapy.error import warning
 from scapy.packet import Packet, Gen
 from scapy.utils import get_temp_file, tcpdump, wrpcap, \
-    ContextManagerSubprocess, PcapReader, PcapWriter
+    ContextManagerSubprocess, PcapReader, PcapWriter, PcapWriter_sniff
 from scapy import plist
 from scapy.error import log_runtime, log_interactive
 from scapy.base_classes import SetGen
@@ -1029,48 +1029,22 @@ def tshark(*args, **kargs):
     print("\n%d packet%s captured" % (i[0], 's' if i[0] > 1 else ''))
 
 
-def create_file_name(file_name, num, b):
+def create_file_name(file_name, num):
     num = str(num)
-    while len(num) < b:
-        num = '0' + num
-
     return file_name + '_' + num + '.pcap'
 
 # 监听存储
-def sniff_store(res_dir_path, batch_size, file_name_prefix, count=0, offline=None, prn=None, lfilter=None,
-          L2socket=None, timeout=None, opened_socket=None,
-          stop_filter=None, iface=None, started_callback=None, *arg, **karg):
+def sniff_store(res_dir_path, batch_size, count=None, file_name_prefix=None,
+          timeout=None,  stop_filter=None, iface=None, *arg, **karg):
+
+    if file_name_prefix is None:
+        file_name_prefix = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(time.time()))
+
+
     c = 0
     sniff_sockets = {}  # socket: label dict
-    if opened_socket is not None:
-        if isinstance(opened_socket, list):
-            sniff_sockets.update((s, "socket%d" % i)
-                                 for i, s in enumerate(opened_socket))
-        elif isinstance(opened_socket, dict):
-            sniff_sockets.update((s, label)
-                                 for s, label in six.iteritems(opened_socket))
-        else:
-            sniff_sockets[opened_socket] = "socket0"
-    if offline is not None:
-        flt = karg.get('filter')
-        if isinstance(offline, list):
-            sniff_sockets.update((PcapReader(
-                fname if flt is None else
-                tcpdump(fname, args=["-w", "-", flt], getfd=True)
-            ), fname) for fname in offline)
-        elif isinstance(offline, dict):
-            sniff_sockets.update((PcapReader(
-                fname if flt is None else
-                tcpdump(fname, args=["-w", "-", flt], getfd=True)
-            ), label) for fname, label in six.iteritems(offline))
-        else:
-            sniff_sockets[PcapReader(
-                offline if flt is None else
-                tcpdump(offline, args=["-w", "-", flt], getfd=True)
-            )] = offline
     if not sniff_sockets or iface is not None:
-        if L2socket is None:
-            L2socket = conf.L2listen
+        L2socket = conf.L2listen
         if isinstance(iface, list):
             sniff_sockets.update(
                 (L2socket(type=ETH_P_ALL, iface=ifname, *arg, **karg), ifname)
@@ -1105,8 +1079,6 @@ def sniff_store(res_dir_path, batch_size, file_name_prefix, count=0, offline=Non
     lst = []
     res_file_num = 0
     try:
-        if started_callback:
-            started_callback()
         while sniff_sockets:
             if timeout is not None:
                 remain = stoptime - time.time()
@@ -1114,7 +1086,9 @@ def sniff_store(res_dir_path, batch_size, file_name_prefix, count=0, offline=Non
                     break
             for s in _select(sniff_sockets, remain):
                 try:
-                    p = s.recv()
+                    # p = s.recv()
+                    p = s.recv_noanalysis()
+                    print(p)
                 except socket.error as ex:
                     log_runtime.warning("Socket %s failed with '%s' and thus"
                                         " will be ignored" % (s, ex))
@@ -1130,45 +1104,39 @@ def sniff_store(res_dir_path, batch_size, file_name_prefix, count=0, offline=Non
                         pass
                     del sniff_sockets[s]
                     break
-                if lfilter and not lfilter(p):
-                    continue
-                p.sniffed_on = sniff_sockets[s]
+                # p.sniffed_on = sniff_sockets[s]
 
 
                 lst.append(p)
                 # 存储报文
                 if len(lst) == batch_size:
-                    res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+                    res_file_name = create_file_name(file_name_prefix, res_file_num)
                     res_file_num += 1
                     res_file_path = os.path.join(res_dir_path, res_file_name)
-                    with PcapWriter(res_file_path) as wfdesc:
+                    # with PcapWriter(res_file_path) as wfdesc:
+                    with PcapWriter_sniff(res_file_path) as wfdesc:
                         wfdesc.write(lst)
                     lst = []
 
-
-
                 c += 1
-                if prn:
-                    r = prn(p)
-                    if r is not None:
-                        print(r)
-                if stop_filter and stop_filter(p):
-                    sniff_sockets = []
-                    break
-                if 0 < count <= c:
+                # if stop_filter and stop_filter(p):
+                #     sniff_sockets = []
+                #     break
+                if count is not None and 0 < count <= c:
                     sniff_sockets = []
                     break
     except KeyboardInterrupt:
         pass
-    if opened_socket is None:
-        for s in sniff_sockets:
-            s.close()
+
+    for s in sniff_sockets:
+        s.close()
 
     if len(lst) != 0:
-        res_file_name = create_file_name(file_name_prefix, res_file_num, 5)
+        res_file_name = create_file_name(file_name_prefix, res_file_num)
         res_file_num += 1
         res_file_path = os.path.join(res_dir_path, res_file_name)
-        with PcapWriter(res_file_path) as wfdesc:
+        # with PcapWriter(res_file_path) as wfdesc:
+        with PcapWriter_sniff(res_file_path) as wfdesc:
             wfdesc.write(lst)
         lst = []
 

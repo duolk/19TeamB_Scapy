@@ -68,6 +68,15 @@ class SuperSocket(six.with_metaclass(_SuperSocket_metaclass)):
         pkt.time = ts
         return pkt
 
+    def recv_noanalysis(self, x=MTU):
+        cls, val, ts = self.recv_raw(x)
+        if not val or not cls:
+            return
+        packet = {'val' : val, 'time' : ts}
+        return packet
+
+
+
     def fileno(self):
         return self.ins.fileno()
 

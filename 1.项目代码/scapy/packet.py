@@ -167,7 +167,7 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
 
 
     # 获取协议类型
-    def get_pro_type(self, flag=0):
+    def get_pro_type(self, mode=0, layer = -1):
         pro_list = []
         final_pro = ''
         pk = self
@@ -180,14 +180,17 @@ class Packet(six.with_metaclass(Packet_metaclass, BasePacket,
             else:
                 final_pro = pk.name
             pk = pk.payload
+        if mode == 0:
+            if layer == -1:
+                return final_pro
+            elif layer < len(pro_list):
+                return pro_list[layer]
+            else:
+                return 'NoPayload'
 
-
-        if flag == 0 :
-            return final_pro
-        elif flag == 1:
-            return pro_list
         else:
-            return final_pro, pro_list
+            return pro_list
+
 
     def init_fields(self):
         """
