@@ -1033,8 +1033,24 @@ def create_file_name(file_name, num):
     num = str(num)
     return file_name + '_' + num + '.pcap'
 
-# 监听存储
-def sniff_store(res_dir_path, batch_size, count=None, file_name_prefix=None,
+'''
+函数作用：监听持久化
+参数：
+    res_dir_path：监听结果存储路径
+    batch_size：存储批大小
+    mode：报文解析方式。默认为0，不解析报文；也可以设为1，解析报文。
+    file_name_prefix：文件名前缀，默认为开始监听的时间
+    iface：监听接口，默认监听本机可以监听的所有接口
+    filter：监听规则，BPF规则
+    
+    监听停止条件
+    count：监听多少个报文后停止监听
+    timeout：监听多久后停止监听，单位为s
+    stop_filter：监听到某条满足条件的报文时停止监听
+    
+
+'''
+def sniff_store(res_dir_path, batch_size, mode=0, count=None, file_name_prefix=None,
           timeout=None,  stop_filter=None, iface=None, *arg, **karg):
 
     if file_name_prefix is None:
@@ -1042,6 +1058,7 @@ def sniff_store(res_dir_path, batch_size, count=None, file_name_prefix=None,
 
 
     c = 0
+    # 创建监听接口对象
     sniff_sockets = {}  # socket: label dict
     if not sniff_sockets or iface is not None:
         L2socket = conf.L2listen
@@ -1078,55 +1095,103 @@ def sniff_store(res_dir_path, batch_size, count=None, file_name_prefix=None,
 
     lst = []
     res_file_num = 0
-    try:
-        while sniff_sockets:
-            if timeout is not None:
-                remain = stoptime - time.time()
-                if remain <= 0:
-                    break
-            for s in _select(sniff_sockets, remain):
-                try:
-                    # p = s.recv()
-                    p = s.recv_noanalysis()
-                    print(p)
-                except socket.error as ex:
-                    log_runtime.warning("Socket %s failed with '%s' and thus"
-                                        " will be ignored" % (s, ex))
-                    del sniff_sockets[s]
-                    continue
-                except read_allowed_exceptions:
-                    continue
-                if p is None:
+    # 不解析模式
+    if mode == 0:
+        try:
+            while sniff_sockets:
+                if timeout is not None:
+                    remain = stoptime - time.time()
+                    if remain <= 0:
+                        break
+                for s in _select(sniff_sockets, remain):
                     try:
-                        if s.promisc:
-                            continue
-                    except AttributeError:
-                        pass
-                    del sniff_sockets[s]
-                    break
-                # p.sniffed_on = sniff_sockets[s]
+                        p = s.recv_noanalysis()
+                    except socket.error as ex:
+                        log_runtime.warning("Socket %s failed with '%s' and thus"
+                                            " will be ignored" % (s, ex))
+                        del sniff_sockets[s]
+                        continue
+                    except read_allowed_exceptions:
+                        continue
+                    if p is None:
+                        try:
+                            if s.promisc:
+                                continue
+                        except AttributeError:
+                            pass
+                        del sniff_sockets[s]
+                        break
+
+                    lst.append(p)
+                    # 存储报文
+                    if len(lst) == batch_size:
+                        print(lst[0])
+
+                        res_file_name = create_file_name(file_name_prefix, res_file_num)
+                        res_file_num += 1
+                        res_file_path = os.path.join(res_dir_path, res_file_name)
+                        with PcapWriter_sniff(res_file_path) as wfdesc:
+                            wfdesc.write(lst)
+                        lst = []
+
+                    c += 1
+                    if count is not None and 0 < count <= c:
+                        sniff_sockets = []
+                        break
+        except KeyboardInterrupt:
+            pass
+    # 解析模式
+    else:
+        try:
+            while sniff_sockets:
+                if timeout is not None:
+                    remain = stoptime - time.time()
+                    if remain <= 0:
+                        break
+                for s in _select(sniff_sockets, remain):
+                    try:
+                        p = s.recv()
+                    except socket.error as ex:
+                        log_runtime.warning("Socket %s failed with '%s' and thus"
+                                            " will be ignored" % (s, ex))
+                        del sniff_sockets[s]
+                        continue
+                    except read_allowed_exceptions:
+                        continue
+                    if p is None:
+                        try:
+                            if s.promisc:
+                                continue
+                        except AttributeError:
+                            pass
+                        del sniff_sockets[s]
+                        break
+                    p.sniffed_on = sniff_sockets[s]
 
 
-                lst.append(p)
-                # 存储报文
-                if len(lst) == batch_size:
-                    res_file_name = create_file_name(file_name_prefix, res_file_num)
-                    res_file_num += 1
-                    res_file_path = os.path.join(res_dir_path, res_file_name)
-                    # with PcapWriter(res_file_path) as wfdesc:
-                    with PcapWriter_sniff(res_file_path) as wfdesc:
-                        wfdesc.write(lst)
-                    lst = []
+                    lst.append(p)
+                    # 存储报文
+                    if len(lst) == batch_size:
+                        print(lst[0])
 
-                c += 1
-                # if stop_filter and stop_filter(p):
-                #     sniff_sockets = []
-                #     break
-                if count is not None and 0 < count <= c:
-                    sniff_sockets = []
-                    break
-    except KeyboardInterrupt:
-        pass
+                        res_file_name = create_file_name(file_name_prefix, res_file_num)
+                        res_file_num += 1
+                        res_file_path = os.path.join(res_dir_path, res_file_name)
+                        with PcapWriter(res_file_path) as wfdesc:
+                            wfdesc.write(lst)
+                        lst = []
+
+                    c += 1
+                    if stop_filter and stop_filter(p):
+                        sniff_sockets = []
+                        break
+                    if count is not None and 0 < count <= c:
+                        sniff_sockets = []
+                        break
+        except KeyboardInterrupt:
+            pass
+
+
 
     for s in sniff_sockets:
         s.close()
@@ -1135,9 +1200,12 @@ def sniff_store(res_dir_path, batch_size, count=None, file_name_prefix=None,
         res_file_name = create_file_name(file_name_prefix, res_file_num)
         res_file_num += 1
         res_file_path = os.path.join(res_dir_path, res_file_name)
-        # with PcapWriter(res_file_path) as wfdesc:
-        with PcapWriter_sniff(res_file_path) as wfdesc:
-            wfdesc.write(lst)
+        if mode == 0:
+            with PcapWriter_sniff(res_file_path) as wfdesc:
+                wfdesc.write(lst)
+        else:
+            with PcapWriter(res_file_path) as wfdesc:
+                wfdesc.write(lst)
         lst = []
 
 
