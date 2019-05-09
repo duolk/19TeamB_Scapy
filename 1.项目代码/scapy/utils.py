@@ -1762,13 +1762,14 @@ class NoAnalysis_PcapReader(six.with_metaclass(PcapReader_metaclass)):
         elif magic == b"\x4d\x3c\xb2\xa1":  # little endian, nanosecond-precision  # noqa: E501
             self.endian = "<"
         else:
-            raise Scapy_Exception(
-                "Not a pcap capture file (bad magic: %r)" % magic
-            )
+            print("Not a pcap capture file (bad magic: %r)" % magic)
+            sys.exit()
+
         hdr = self.f.read(20)
 
         if len(hdr) < 20:
-            raise Scapy_Exception("Invalid pcap file (too short)")
+            print("Invalid pcap file (too short)")
+            sys.exit()
 
         # 保存头部完整的字节码
         self.pcap_head = magic + hdr
