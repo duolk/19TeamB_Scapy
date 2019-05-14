@@ -1876,7 +1876,7 @@ def split_pcap(src_file_path, res_dir_path, batch_size, mode=0, file_name_prefix
             with PcapWriter(res_file_path) as wfdesc:
                 wfdesc.write(pk_list)
             pk_list = []
-    else:
+    elif mode == 1:
         pk_list = []
         res_file_num = 0
         pcap_head = ''
@@ -1903,5 +1903,7 @@ def split_pcap(src_file_path, res_dir_path, batch_size, mode=0, file_name_prefix
                 with NoAnalysis_PcapWriter(res_file_path) as wfdesc:
                     wfdesc.write(pcap_head, pk_list)
                 pk_list = []
+    else:
+        print('Error mode')
 
     return

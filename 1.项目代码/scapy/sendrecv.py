@@ -1053,6 +1053,10 @@ def create_file_name(file_name, num):
 def sniff_store(res_dir_path, batch_size, mode=0, count=None, file_name_prefix=None,
           timeout=None,  stop_filter=None, iface=None, *arg, **karg):
 
+    if mode == 0 and stop_filter != None:
+        print("stop_filter can't used in mode 0!")
+        return
+
     if file_name_prefix is None:
         file_name_prefix = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(time.time()))
 
@@ -1125,7 +1129,7 @@ def sniff_store(res_dir_path, batch_size, mode=0, count=None, file_name_prefix=N
                     lst.append(p)
                     # 存储报文
                     if len(lst) == batch_size:
-                        print(lst[0])
+                        # print(lst[0])
 
                         res_file_name = create_file_name(file_name_prefix, res_file_num)
                         res_file_num += 1
@@ -1172,7 +1176,7 @@ def sniff_store(res_dir_path, batch_size, mode=0, count=None, file_name_prefix=N
                     lst.append(p)
                     # 存储报文
                     if len(lst) == batch_size:
-                        print(lst[0])
+                        # print(type(lst[0]))
 
                         res_file_name = create_file_name(file_name_prefix, res_file_num)
                         res_file_num += 1
