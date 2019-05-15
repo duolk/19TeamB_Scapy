@@ -1,5 +1,4 @@
 # -*-coding:utf-8-*-
-import scapy.all as scapy
 import os
 import copy
 import operator
