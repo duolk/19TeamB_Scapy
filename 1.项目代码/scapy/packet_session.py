@@ -1,4 +1,7 @@
 # -*-coding:utf-8-*-
+from scapy import plist
+from scapy.utils import wrpcap
+from scapy.utils import PcapReader
 import os
 import copy
 import operator
@@ -46,7 +49,7 @@ class PacketSession:
         self.start_time = start_time
         self.last_time = start_time
         self.time_window = time_window
-        self.data = scapy.PacketList()
+        self.data = plist.PacketList()
         self.data.append(packet)
         self.append = False
 
@@ -108,7 +111,7 @@ class PacketSession:
         Attributes:
             plus: 若为True，则会话存储为追加模式
         """
-        scapy.wrpcap(self._filename.format(stime=str(self.start_time)), self.data, append=self.append)
+        wrpcap(self._filename.format(stime=str(self.start_time)), self.data, append=self.append)
         self.data.clear()
         if(plus):
             PacketSession.session_count += 1
@@ -166,7 +169,7 @@ class SessionExtractor:
         self.packets = None
         PacketSession.session_count = 0
 
-        pr = scapy.PcapReader(src_path)
+        pr = PcapReader(src_path)
         i = 0
         while True:
             i += 1
