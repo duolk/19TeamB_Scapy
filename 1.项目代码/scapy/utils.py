@@ -1745,11 +1745,24 @@ class PcapWriter_sniff(RawPcapWriter):
                                     wirelen=caplen)
 
 
-class NoAnalysis_PcapReader(six.with_metaclass(PcapReader_metaclass)):
+class NoAnalysis_PcapReader():
     PacketMetadata = collections.namedtuple("PacketMetadata", ["sec", "usec", "wirelen", "caplen"])  # noqa: E501
 
     # 读取pcap文件头部信息
-    def __init__(self, filename, fdesc, magic):
+    def __init__(self, filename):
+        if isinstance(filename, six.string_types):
+            try:
+                fdesc = gzip.open(filename, "rb")
+                magic = fdesc.read(4)
+            except IOError:
+                fdesc = open(filename, "rb")
+                magic = fdesc.read(4)
+        else:
+            fdesc = filename
+            filename = getattr(fdesc, "name", "No name")
+            magic = fdesc.read(4)
+
+
         self.filename = filename
         self.f = fdesc
 
@@ -1762,14 +1775,14 @@ class NoAnalysis_PcapReader(six.with_metaclass(PcapReader_metaclass)):
         elif magic == b"\x4d\x3c\xb2\xa1":  # little endian, nanosecond-precision  # noqa: E501
             self.endian = "<"
         else:
-            print("Not a pcap capture file (bad magic: %r)" % magic)
-            sys.exit()
+            raise Scapy_Exception(
+                "Not a pcap capture file (bad magic: %r)" % magic
+            )
 
         hdr = self.f.read(20)
 
         if len(hdr) < 20:
-            print("Invalid pcap file (too short)")
-            sys.exit()
+            raise Scapy_Exception("Invalid pcap file (too short)")
 
         # 保存头部完整的字节码
         self.pcap_head = magic + hdr
