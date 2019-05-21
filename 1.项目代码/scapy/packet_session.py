@@ -258,7 +258,7 @@ class TetradJudge:
             tetrad: 元组，四元组过滤器中的ip对 (ipsrc, ipdst)
 
         Returns:
-            符合返回True，否则返回False
+            不符合返回True，否则返回False
         """
         s = tetrad.count(None)
         if(s == 0):
@@ -287,7 +287,7 @@ class TetradJudge:
             tetrad: 元组，四元组过滤器 (ipsrc, ipdst, portsrc, portdst)
 
         Returns:
-            符合返回True，否则返回False
+            不符合返回True，否则返回False
         """
         s = tetrad.count(None)
         if (s == 0):
